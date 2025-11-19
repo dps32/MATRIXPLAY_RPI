@@ -1,16 +1,15 @@
-package com.project.client;
+package com.project2.client;
 
 import com.piomatter.PioMatter;
-
 import org.json.JSONObject;
-
 import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-
 import com.piomatter.UtilsFPS;
+import javax.imageio.ImageIO;
+import java.io.File;
 
 public class Main2 {
 
@@ -25,19 +24,27 @@ public class Main2 {
     private static final int RESERVED_TOP = 12;
 
     // Estados de visualización
-    private enum Mode {
-        NONE, TEXT, IMAGE, COUNTDOWN, BALL
-    }
-
+    private enum Mode { NONE, TEXT, IMAGE, COUNTDOWN, BALL, GAME, WAITING_FOR_GAME }
     private volatile Mode mode = Mode.NONE;
     private volatile String text = null;
     private volatile BufferedImage image = null;
     private volatile long expireAtMs = 0L;
+    
+    // Imagen de fondo para el juego
+    private BufferedImage imgFile = null;
 
     // Countdown
     private volatile int countdownValue = 0;
     private volatile long countdownLastUpdateMs = 0L;
-
+    
+    // Estado del juego
+    private volatile float ballX = 0.5f;
+    private volatile float ballY = 0.5f;
+    private volatile float paddle1Y = 0.5f;
+    private volatile float paddle2Y = 0.5f;
+    private volatile int score1 = 0;
+    private volatile int score2 = 0;
+    
     // Guardar modo previo para restaurar después del countdown
     private volatile Mode previousMode = Mode.NONE;
     private volatile String previousText = null;
@@ -48,23 +55,21 @@ public class Main2 {
 
     // WebSocket
     private final UtilsWS2 ws;
-
+    
     // Archivo JSON para guardar la URL
     private static final String URL_FILE = "url.json";
 
-    // Constructor
     public Main2(String serverUri) {
+        System.out.println("[client] Initializing connection to: " + serverUri);
         ws = UtilsWS2.getSharedInstance(serverUri);
         ws.onMessage(this::onWsMessage);
         ws.onOpen(this::onWsOpen);
         ws.onClose(this::onWsClose);
+        System.out.println("[client] WebSocket handlers configured");
     }
 
-    // Callbacks WS
     private void onWsOpen(String msg) {
         System.out.println("[client] Connected: " + msg);
-        // Cuando se conecta, cargar y preservar la URL guardada para mostrarla después
-        // del groupname
         String savedUrl = loadUrlFromJson();
         if (!savedUrl.isEmpty()) {
             previousMode = Mode.TEXT;
@@ -73,10 +78,7 @@ public class Main2 {
             System.out.println("[client] Loaded saved URL: " + savedUrl);
         }
 
-        // Solicitar el nombre del grupo al servidor
         requestGroupNameFromServer();
-
-        // Solicitar la URL al servidor
         requestUrlFromServer();
     }
 
@@ -84,7 +86,6 @@ public class Main2 {
         System.out.println("[client] Disconnected: " + msg);
     }
 
-    // Enviar solicitud de URL al servidor
     private void requestUrlFromServer() {
         try {
             JSONObject request = new JSONObject();
@@ -96,7 +97,6 @@ public class Main2 {
         }
     }
 
-    // Enviar solicitud de groupname al servidor
     private void requestGroupNameFromServer() {
         try {
             JSONObject request = new JSONObject();
@@ -108,7 +108,6 @@ public class Main2 {
         }
     }
 
-    // Manejar mensajes entrantes del WS
     private void onWsMessage(String msg) {
         try {
             JSONObject o = new JSONObject(msg);
@@ -119,42 +118,38 @@ public class Main2 {
                     System.out.println("[client] Welcome message: " + welcomeMsg);
                 }
                 case "groupname" -> {
-                    String groupName = o.optString("message", "");
+                    String groupName = o.optString("value", "");
                     System.out.println("[client] Group name: " + groupName);
                     if (!groupName.isEmpty()) {
-                        // No machacar previous si ya está preparado (p.ej. con la URL cargada del JSON)
                         if (previousMode == Mode.NONE && text != null) {
                             previousMode = mode;
                             previousText = text;
                             previousImage = image;
                         }
 
-                        // Mostrar el nombre del grupo temporalmente
                         text = "Group: " + groupName;
                         mode = Mode.TEXT;
-                        scrollX = WIDTH; // Reiniciar scroll
-                        expireAtMs = System.currentTimeMillis() + 40_000L; // 40 segundos reales
+                        scrollX = WIDTH;
+                        expireAtMs = System.currentTimeMillis() + 40_000L;
                         System.out.println("[client] Showing group name for 40 seconds");
                     }
                 }
                 case "url" -> {
-                    String url = o.optString("message", "");
+                    String url = o.optString("value", "");
                     if (!url.isEmpty()) {
                         saveUrlToJson(url);
 
-                        // Si estamos mostrando el groupname, guardar la URL para después
                         if (mode == Mode.TEXT && text != null && text.startsWith("Group: ")) {
                             previousMode = Mode.TEXT;
                             previousText = url;
                             previousImage = null;
                             System.out.println("[client] URL saved to show after group name");
                         } else {
-                            // Si no hay groupname activo, mostrar URL directamente
                             text = url;
                             image = null;
                             mode = Mode.TEXT;
                             scrollX = WIDTH;
-                            expireAtMs = System.currentTimeMillis() + 3_600_000L; // 1 hora
+                            expireAtMs = System.currentTimeMillis() + 3_600_000L;
                             System.out.println("[client] URL displayed immediately");
                         }
                     }
@@ -162,7 +157,6 @@ public class Main2 {
                 case "countdown" -> {
                     int count = o.optInt("number", 3);
                     if (count >= 0) {
-                        // Guardar el estado actual para restaurarlo después
                         if (mode != Mode.NONE && previousMode == Mode.NONE) {
                             previousMode = mode;
                             previousText = text;
@@ -172,17 +166,50 @@ public class Main2 {
                         countdownValue = count;
                         countdownLastUpdateMs = System.currentTimeMillis();
                         mode = Mode.COUNTDOWN;
-                        expireAtMs = System.currentTimeMillis() + ((count + 1) * 1000L) + 500L;
+                        expireAtMs = System.currentTimeMillis() + ((count + 1) * 1000L) + 4000L; // +4 segundos extra
                         System.out.println("[client] Countdown started from: " + count);
                     }
                 }
-                default -> {
-                    /* ignore */ }
-            }
-        } catch (Exception ignored) {
-        }
-    }
+                case "gameState" -> {
+                    // Actualizar estado del juego
+                    JSONObject ball = o.optJSONObject("ball");
+                    if (ball != null) {
+                        ballX = (float) ball.optDouble("x", 0.5);
+                        ballY = (float) ball.optDouble("y", 0.5);
+                    }
 
+                    JSONObject paddle1 = o.optJSONObject("paddle1");
+                    if (paddle1 != null) {
+                        paddle1Y = (float) paddle1.optDouble("y", 0.5);
+                    }
+
+                    JSONObject paddle2 = o.optJSONObject("paddle2");
+                    if (paddle2 != null) {
+                        paddle2Y = (float) paddle2.optDouble("y", 0.5);
+                    }
+
+                    JSONObject score = o.optJSONObject("score");
+                    if (score != null) {
+                        score1 = score.optInt("player1", 0);
+                        score2 = score.optInt("player2", 0);
+                    }
+
+                    // Cambiar al modo de juego solo si countdown terminó o no hay countdown
+                    if (mode == Mode.COUNTDOWN) {
+                        // Guardar que hay un juego esperando
+                        mode = Mode.WAITING_FOR_GAME;
+                        System.out.println("[client] Game waiting for countdown to finish");
+                    } else if (mode != Mode.GAME) {
+                        mode = Mode.GAME;
+                        expireAtMs = Long.MAX_VALUE; // No expira
+                        System.out.println("[client] Game mode activated");
+                    }
+                }
+                default -> { /* ignore */ }
+            }
+        } catch (Exception ignored) {}
+    }
+    
     private void saveUrlToJson(String url) {
         try {
             JSONObject json = new JSONObject();
@@ -190,15 +217,16 @@ public class Main2 {
             json.put("timestamp", System.currentTimeMillis());
 
             Files.writeString(
-                    Paths.get(URL_FILE),
-                    json.toString(2),
-                    StandardCharsets.UTF_8);
+                Paths.get(URL_FILE),
+                json.toString(2),
+                StandardCharsets.UTF_8
+            );
             System.out.println("[client] URL saved to " + Paths.get(URL_FILE).toAbsolutePath());
         } catch (Exception e) {
             System.err.println("[client] Error saving URL to JSON: " + e.getMessage());
         }
     }
-
+    
     private String loadUrlFromJson() {
         try {
             if (Files.exists(Paths.get(URL_FILE))) {
@@ -224,15 +252,36 @@ public class Main2 {
         final UtilsFPS fps = new UtilsFPS();
 
         try {
-            // Un pequeño empujón de prioridad ayuda a la regularidad sin introducir
-            // limitadores nuevos
+            System.out.println("[client] Setting thread priority...");
+            try { Thread.currentThread().setPriority(Math.min(Thread.MAX_PRIORITY - 1, Thread.NORM_PRIORITY + 2)); } catch (Exception ignored) {}
+
+            // Cargar imagen de fondo para el juego
+            System.out.println("[client] Loading background image...");
             try {
-                Thread.currentThread().setPriority(Math.min(Thread.MAX_PRIORITY - 1, Thread.NORM_PRIORITY + 2));
-            } catch (Exception ignored) {
+                // Intentar múltiples rutas posibles
+                File imageFile = new File("resources/backgroundPacMan.jpg");
+                if (!imageFile.exists()) {
+                    imageFile = new File("backgroundPacMan.jpg");
+                }
+                if (!imageFile.exists()) {
+                    imageFile = new File("src/main/resources/backgroundPacMan.jpg");
+                }
+                
+                if (imageFile.exists()) {
+                    this.imgFile = ImageIO.read(imageFile);
+                    System.out.println("[client] Background image loaded successfully from: " + imageFile.getAbsolutePath());
+                } else {
+                    System.err.println("[client] Could not find image in any of the expected locations");
+                }
+            } catch (Exception e) {
+                System.err.println("[client] Error loading image: " + e.getMessage());
+                e.printStackTrace();
             }
 
+            System.out.println("[client] Initializing PioMatter...");
             pm = new PioMatter(WIDTH, HEIGHT, ADDR, LANES, BRIGHTNESS, 0);
             fb = pm.mapFramebuffer();
+            System.out.println("[client] PioMatter initialized successfully");
 
             back = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB);
             g = back.createGraphics();
@@ -242,6 +291,7 @@ public class Main2 {
 
             final Font font = new Font("SansSerif", Font.BOLD, 12);
             final Font countdownFont = new Font("SansSerif", Font.BOLD, 48);
+            final Font scoreFont = new Font("SansSerif", Font.BOLD, 10);
             PioMatter.flushBlack(pm, fb, 2, 10);
 
             while (true) {
@@ -252,56 +302,57 @@ public class Main2 {
                 int startY = Math.max(0, RESERVED_TOP);
                 boolean alive = System.currentTimeMillis() < expireAtMs;
 
-                if (alive) {
+                if (alive || mode == Mode.GAME) {
                     if (mode == Mode.COUNTDOWN) {
-                        // Actualizar countdown cada segundo
                         long elapsed = System.currentTimeMillis() - countdownLastUpdateMs;
-                        int currentCount = countdownValue - (int) (elapsed / 1000L);
-
+                        int currentCount = countdownValue - (int)(elapsed / 1000L);
+                        
                         if (currentCount >= 0) {
                             g.setFont(countdownFont);
                             FontMetrics fm = g.getFontMetrics();
                             String countStr = String.valueOf(currentCount);
                             int textWidth = fm.stringWidth(countStr);
                             int textHeight = fm.getAscent();
-
+                            
                             int x = (WIDTH - textWidth) / 2;
                             int y = (HEIGHT + textHeight) / 2;
-
-                            // Color que va cambiando según el número
-                            float hue = currentCount / 3.0f * 0.33f; // De rojo a amarillo
+                            
+                            float hue = currentCount / 3.0f * 0.33f;
                             g.setColor(Color.getHSBColor(hue, 1f, 1f));
                             g.drawString(countStr, x, y);
-                        } else {
-                            // Cuando termina el countdown, mostrar la bola blanca
-                            mode = Mode.BALL;
-                            expireAtMs = System.currentTimeMillis() + 2_000L; // Mostrar bola 2 segundos
                         }
-
+                        
+                    } else if (mode == Mode.WAITING_FOR_GAME) {
+                        // Mostrar pantalla negra mientras esperamos
+                        g.setColor(Color.BLACK);
+                        g.fillRect(0, 0, WIDTH, HEIGHT);
+                        
                     } else if (mode == Mode.BALL) {
-                        // Dibujar círculo blanco en el centro
                         int ballSize = 20;
                         int ballX = (WIDTH - ballSize) / 2;
                         int ballY = (HEIGHT - ballSize) / 2;
-
+                        
                         g.setColor(Color.WHITE);
                         g.fillOval(ballX, ballY, ballSize, ballSize);
-
+                        
+                    } else if (mode == Mode.GAME) {
+                        // DIBUJAR JUEGO DE PONG
+                        drawPongGame(g, scoreFont);
+                        
                     } else if (mode == Mode.TEXT && text != null) {
                         g.setFont(font);
                         FontMetrics fm = g.getFontMetrics();
 
-                        // ---- DIBUJADO O(n): sin stringWidth(substring(0,i)) ----
                         int xCursor = scrollX;
                         for (int i = 0; i < text.length(); i++) {
                             char c = text.charAt(i);
                             int cw = fm.charWidth(c);
 
-                            if (xCursor + cw < 0) { // completamente a la izquierda
+                            if (xCursor + cw < 0) {
                                 xCursor += cw;
                                 continue;
                             }
-                            if (xCursor >= WIDTH) { // ya no se ve nada más
+                            if (xCursor >= WIDTH) {
                                 break;
                             }
 
@@ -313,18 +364,34 @@ public class Main2 {
                         }
 
                         scrollX -= 1;
-                        // Cuando todo el texto salió por la izquierda, reiniciar
-                        if (xCursor < 0)
-                            scrollX = WIDTH;
+                        if (xCursor < 0) scrollX = WIDTH;
                     }
                 } else {
-                    // Expirado, volver a NONE o modo previo
-                    if ((mode == Mode.BALL || mode == Mode.TEXT) && previousMode != Mode.NONE) {
+                    // Expirado
+                    if (mode == Mode.COUNTDOWN || mode == Mode.WAITING_FOR_GAME) {
+                        // Countdown terminó
+                        if (mode == Mode.WAITING_FOR_GAME) {
+                            // Hay un juego esperando, activarlo
+                            mode = Mode.GAME;
+                            expireAtMs = Long.MAX_VALUE;
+                            System.out.println("[client] Countdown finished, starting game");
+                        } else {
+                            // No hay juego, restaurar modo anterior
+                            mode = previousMode;
+                            text = previousText;
+                            image = previousImage;
+                            expireAtMs = System.currentTimeMillis() + 3_600_000L;
+                            scrollX = WIDTH;
+                            previousMode = Mode.NONE;
+                            previousText = null;
+                            previousImage = null;
+                        }
+                    } else if ((mode == Mode.BALL || mode == Mode.TEXT) && previousMode != Mode.NONE) {
                         mode = previousMode;
                         text = previousText;
                         image = previousImage;
-                        expireAtMs = System.currentTimeMillis() + 3_600_000L; // 1 hora
-                        scrollX = WIDTH; // Reiniciar scroll
+                        expireAtMs = System.currentTimeMillis() + 3_600_000L;
+                        scrollX = WIDTH;
                         previousMode = Mode.NONE;
                         previousText = null;
                         previousImage = null;
@@ -335,19 +402,17 @@ public class Main2 {
                     }
                 }
 
-                // Dibujar overlay FPS (de tu UtilsFPS)
-                fps.drawOverlay(g, 1, 9);
+                // Overlay FPS (no mostrar durante el juego)
+                if (mode != Mode.GAME) {
+                    fps.drawOverlay(g, 1, 9);
+                }
 
                 // Indicador de conexión WS
-                int iconSize = 5;
-                int iconX = WIDTH - iconSize - 2;
-                int iconY = 2;
-                if (ws.isOpen()) {
-                    g.setColor(Color.GREEN); // conectado
-                } else {
-                    g.setColor(Color.RED); // desconectado
-                }
-                g.fillOval(iconX, iconY, iconSize, iconSize);
+                int iconSize = 3;
+                int iconX = WIDTH - iconSize - 1;
+                int iconY = 1;
+                g.setColor(ws.isOpen() ? Color.GREEN : Color.RED);
+                g.fillRect(iconX, iconY, iconSize, iconSize);
 
                 PioMatter.copyBufferedImageToRGB888(back, fb.data, fb.strideBytes, WIDTH, HEIGHT, BRIGHTNESS);
                 pm.swap();
@@ -357,22 +422,82 @@ public class Main2 {
         } catch (Throwable t) {
             t.printStackTrace();
         } finally {
-            if (g != null)
-                g.dispose();
-            try {
-                if (pm != null && fb != null)
-                    PioMatter.flushBlack(pm, fb, 2, 10);
-            } catch (InterruptedException ignored) {
-            }
-            if (pm != null)
-                pm.close();
+            if (g != null) g.dispose();
+            try { if (pm != null && fb != null) PioMatter.flushBlack(pm, fb, 2, 10); } catch (InterruptedException ignored) {}
+            if (pm != null) pm.close();
             ws.forceExit();
         }
     }
 
+    private void drawPongGame(Graphics2D g, Font scoreFont) {
+        // Dimensiones de elementos del juego
+        final int paddleWidth = 2;
+        final int paddleHeight = 15;
+        final int ballSize = 3;
+        final int playAreaTop = 0;  // Toda la pantalla es el campo
+        final int playAreaHeight = HEIGHT;
+
+        // Dibujar imagen de fondo si está disponible
+        if (imgFile != null) {
+            // Escalar y dibujar la imagen para que cubra toda la pantalla
+            g.drawImage(imgFile, 0, 0, WIDTH, HEIGHT, null);
+            // Añadir una capa semi-transparente para mejorar la visibilidad de los elementos
+            g.setColor(new Color(0, 0, 0, 100));
+            g.fillRect(0, 0, WIDTH, HEIGHT);
+        } else {
+            // Si no hay imagen, dibujar fondo negro
+            g.setColor(Color.BLACK);
+            g.fillRect(0, 0, WIDTH, HEIGHT);
+        }
+
+        // Dibujar línea central DOBLE
+        g.setColor(new Color(80, 80, 80));
+        int centerX = WIDTH / 2;
+        for (int y = playAreaTop; y < HEIGHT; y += 4) {
+            g.drawLine(centerX, y, centerX, y + 2);
+        }
+
+        // Dibujar pala izquierda (Jugador 1) - en el borde izquierdo
+        int paddle1YPixel = (int) (playAreaTop + paddle1Y * playAreaHeight);
+        g.setColor(Color.WHITE);
+        g.fillRect(0, paddle1YPixel - paddleHeight / 2, paddleWidth, paddleHeight);
+
+        // Dibujar pala derecha (Jugador 2) - en el borde derecho
+        int paddle2YPixel = (int) (playAreaTop + paddle2Y * playAreaHeight);
+        g.fillRect(WIDTH - paddleWidth, paddle2YPixel - paddleHeight / 2, paddleWidth, paddleHeight);
+
+        // Dibujar pelota
+        int ballXPixel = (int) (ballX * WIDTH);
+        int ballYPixel = (int) (playAreaTop + ballY * playAreaHeight);
+        g.fillOval(ballXPixel - ballSize / 2, ballYPixel - ballSize / 2, ballSize, ballSize);
+
+        // Dibujar puntuaciones en la parte superior con fondo semi-transparente
+        g.setFont(scoreFont);
+        FontMetrics fm = g.getFontMetrics();
+        String scoreText = score1 + " - " + score2;
+        int textWidth = fm.stringWidth(scoreText);
+        int textX = (WIDTH - textWidth) / 2;
+        int textY = 8;
+        
+        // Fondo semi-transparente para la puntuación
+        g.setColor(new Color(0, 0, 0, 200));
+        g.fillRect(textX - 2, textY - fm.getAscent(), textWidth + 4, fm.getHeight());
+        
+        // Texto de puntuación
+        g.setColor(Color.WHITE);
+        g.drawString(scoreText, textX, textY);
+    }
+
     public static void main(String[] args) {
+        System.out.println("[client] Starting Main2...");
+        System.out.println("[client] Java version: " + System.getProperty("java.version"));
+        System.out.println("[client] Working directory: " + System.getProperty("user.dir"));
+        
         String serverURI = (args.length > 0) ? args[0] : "wss://matrixplay1.ieti.site:443";
+        System.out.println("[client] Server URI: " + serverURI);
+        
         Main2 app = new Main2(serverURI);
+        System.out.println("[client] Main2 instance created, starting run loop...");
         app.run();
     }
 }
